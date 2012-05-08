@@ -2,6 +2,10 @@ Swank that works with current SLIME
 
 The following fixes were applied to MIT/GNU Scheme swank.scm (git)
 
+* Usage
+
+Put =(load "/home/nex/svn/scheme/swank.scm" (->environment '(runtime swank)))= somewhere into your =~/.scheme.init=.
+
 * Startup Problems
 - M-x slime raises condition "Unbound variable: swank:swank-require" (which Emacs sends when (slime-setup '(slime-fancy)) is used)
   => fixed by defining swank:swank-require to return '()
