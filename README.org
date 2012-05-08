@@ -1,0 +1,62 @@
+Swank that works with current SLIME
+
+The following fixes were applied to MIT/GNU Scheme swank.scm (git)
+
+* Startup Problems
+- M-x slime raises condition "Unbound variable: swank:swank-require" (which Emacs sends when (slime-setup '(slime-fancy)) is used)
+  => fixed by defining swank:swank-require to return '()
+- M-x slime shows "error in process filter: Can't find suitable coding-system"
+  => fixed by adding :encoding (:coding-systems ("utf-8-unix" "iso-latin-1-unix")) to the connection info
+- M-x slime raises condition "Unbound variable :conding-system" (which is due to all parameters being evaluated)
+  => fixed by adding QUOTE-SPECIAL and mapping it over the parameters (quoting all keywords [symbols that start with a colon] and T and NIL)
+- Typing an expression raises condition "Unbound variable: swank:autodoc"
+  => fixed by defining swank:autodoc to return (list ':not-available 't)
+- Slime complains about mismatched versions
+  => fixed by changing :version in swank:connection-info to "2012-05-02" which matches slime-cvs
+
+Now we have a working SLIME REPL again.
+
+* Autodoc
+Actually implement swank:autodoc. It is called with a list form that
+contains the special symbol swank::%cursor-marker% somewhere to show the
+position of the cursor. 
+The new procedure FIND-STRING-BEFORE-SWANK-CURSOR-MARKER returns the
+symbol that starts the expression which contains the cursor as a
+string. 
+The new procedure PROCEDURE-PARAMETERS returns a list containing the
+function name and the list of parameters (as printed by PA) if symbol is
+bound to a function. 
+The new variable SWANK-EXTRA-DOCUMENTATION contains an (incomplete) list
+of "parameters" to special forms and macros. 
+
+Now we have working autodoc in the REPL and in Scheme buffers.
+
+* Completion
+Trying to auto-complete in the REPL raises condition "Unbound variable:
+swank:completions". It seems swank added swank:completions in addition
+(or instead of?) swank:simple-completions.
+
+* Directories
+Added directory functions SWANK:DEFAULT-DIRECTORY and
+SWANK:SET-DEFAULT-DIRECTORY for slime commands ,!d ,cd ,+d ,-d
+,change-directory ,push-directory ,pop-directory ,pushd ,popd ,pwd
+
+* Debugging
+There are numerous problems, including no replies sent to messages and
+incorrect replies.
+- Added condition/report-string to the abort message.
+- Added a DYNAMIC-WIND in the condition handler in the message handler
+  for emacs-rex to ensure that the :abort message is always written,
+  even when a restart is called.
+- Added a global (fluid) binding *index* that is used to send the
+  correct message index in the :debug message.
+
+* Describing
+Adding basic support for SWANK:DESCRIBE-FUNCTION and
+SWANK:DESCRIBE-SYMBOL.
+
+* Apropos
+The returned lists are formatted incorrectly (not Lisp proplists). Fixed this.
+
+* Compiling
+The binding for compile-and-load is missing. Not implemented yet.
