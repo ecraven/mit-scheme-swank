@@ -4,7 +4,7 @@ The following fixes were applied to MIT/GNU Scheme swank.scm (git)
 
 * Usage
 
-Put =(load "/home/nex/svn/scheme/swank.scm" (->environment '(runtime swank)))= somewhere into your =~/.scheme.init=.
+Put =(load "/path/to/new/swank.scm" (->environment '(runtime swank)))= somewhere into your =~/.scheme.init=. Alternatively, replace =runtime/swank.scm= with this =swank.scm=, but remove the last line (=(initialize-package!)= is run automatically in that case).
 
 * Startup Problems
 - M-x slime raises condition "Unbound variable: swank:swank-require" (which Emacs sends when (slime-setup '(slime-fancy)) is used)
