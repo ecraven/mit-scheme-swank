@@ -1,12 +1,14 @@
 Swank that works with current SLIME
-
-The following fixes were applied to MIT/GNU Scheme swank.scm (git)
-
 * Usage
 
-Put =(load "/path/to/new/swank.scm" (->environment '(runtime swank)))= somewhere into your =~/.scheme.init=. Alternatively, replace =runtime/swank.scm= with this =swank.scm=, but remove the last line (=(initialize-package!)= is run automatically in that case).
+Put =(load "/path/to/new/swank.scm" (->environment '(runtime swank)))= somewhere into your =~/.scheme.init=. 
 
-* Startup Problems
+Alternatively, replace =runtime/swank.scm= in your MIT/GNU Scheme source directory with this =swank.scm= before building it, but remove the last line (because =(initialize-package!)= is run automatically in that case).
+
+* Updates
+The following fixes were applied to MIT/GNU Scheme swank.scm (git)
+
+** Startup Problems
 - M-x slime raises condition "Unbound variable: swank:swank-require" (which Emacs sends when (slime-setup '(slime-fancy)) is used)
   => fixed by defining swank:swank-require to return '()
 - M-x slime shows "error in process filter: Can't find suitable coding-system"
@@ -20,7 +22,7 @@ Put =(load "/path/to/new/swank.scm" (->environment '(runtime swank)))= somewhere
 
 Now we have a working SLIME REPL again.
 
-* Autodoc
+** Autodoc
 Actually implement swank:autodoc. It is called with a list form that
 contains the special symbol swank::%cursor-marker% somewhere to show the
 position of the cursor. 
@@ -35,17 +37,17 @@ of "parameters" to special forms and macros.
 
 Now we have working autodoc in the REPL and in Scheme buffers.
 
-* Completion
+** Completion
 Trying to auto-complete in the REPL raises condition "Unbound variable:
 swank:completions". It seems swank added swank:completions in addition
 (or instead of?) swank:simple-completions.
 
-* Directories
+** Directories
 Added directory functions SWANK:DEFAULT-DIRECTORY and
 SWANK:SET-DEFAULT-DIRECTORY for slime commands ,!d ,cd ,+d ,-d
 ,change-directory ,push-directory ,pop-directory ,pushd ,popd ,pwd
 
-* Debugging
+** Debugging
 There are numerous problems, including no replies sent to messages and
 incorrect replies.
 - Added condition/report-string to the abort message.
@@ -55,12 +57,12 @@ incorrect replies.
 - Added a global (fluid) binding *index* that is used to send the
   correct message index in the :debug message.
 
-* Describing
+** Describing
 Adding basic support for SWANK:DESCRIBE-FUNCTION and
 SWANK:DESCRIBE-SYMBOL.
 
-* Apropos
+** Apropos
 The returned lists are formatted incorrectly (not Lisp proplists). Fixed this.
 
-* Compiling
+** Compiling
 The binding for compile-and-load is missing. Not implemented yet.
