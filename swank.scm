@@ -34,7 +34,7 @@ USA.
 
 ;;; Suggested for .emacs:
 #|
-\(when (require 'slime nil t)
+(when (require 'slime nil t)
 
   (defun mit-scheme-start-swank (file encoding)
     (format "%S\n\n" `(start-swank ,file)))
