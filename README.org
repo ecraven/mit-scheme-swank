@@ -1,4 +1,7 @@
 A version of Swank for MIT/GNU Scheme that works with current SLIME CVS.
+
+/Keywords:/ swank mit-scheme slime
+
 * Usage
 
 Put =(load "/path/to/new/swank.scm" (->environment '(runtime swank)))= somewhere into your =~/.scheme.init=. 
