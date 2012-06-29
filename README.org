@@ -69,3 +69,7 @@ The returned lists are formatted incorrectly (not Lisp proplists). Fixed this.
 
 ** Compiling
 The binding for compile-and-load is missing. Not implemented yet.
+
+** Presentations
+Added support for "presentations". Every result is clickable in Emacs,
+which recalls the value.

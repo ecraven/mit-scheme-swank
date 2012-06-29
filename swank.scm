@@ -194,6 +194,12 @@ USA.
 
 ;;;; Message handlers
 
+(define (fix-hashbang x)
+  (if (and (symbol? x)
+	   (string-prefix? "#!" (symbol->string x)))
+      (symbol->string x)
+      x))
+
 (define-message-handler '(':emacs-rex form datum datum index)
   (lambda (socket level sexp pstring thread id)
     thread
@@ -209,7 +215,7 @@ USA.
 		 (lambda ()
 		   (write-message `(:return (:abort ,(condition/report-string condition)) ,id) socket))))
 	 (lambda ()
-	   (write-message `(:return (:ok ,(emacs-rex socket sexp pstring id))
+	   (write-message `(:return (:ok ,(fix-hashbang (emacs-rex socket sexp pstring id)))
 				    ,id)
 			  socket)))))))
 (define *index*)
@@ -266,19 +272,35 @@ USA.
 		 string))
 
 (define (swank:listener-eval socket string)
-  (write-message `(:write-string ,(interactive-eval (read-from-string string)
-						    socket
-						    #t)
-				 :repl-result)
-		 socket)
+  (let* ((result (interactive-eval (read-from-string string)
+				   socket
+				   #f))
+	 (hash-number (hash result)))
+    (if (and *any-output?* 
+	     (not *last-character-newline?*))
+	(write-message `(:write-string "\n" :repl-result) socket))
+    (write-message `(:presentation-start ,hash-number :repl-result)
+		   socket)
+    (write-message `(:write-string ,(format #f "~a" result)
+				   :repl-result)
+		   socket)
+    (write-message `(:presentation-end ,hash-number :repl-result)
+		   socket)
+    (write-message `(:write-string "\n" :repl-result)
+		   socket)
+    (set! *any-output?* #f))
   'NIL)
 
 (define (interactive-eval sexp socket nl?)
   (let ((value (repl-eval sexp socket)))
-    (call-with-output-string
-      (lambda (port)
-	(port/write-result port sexp value (object-hash value) (buffer-env))
-	(if nl? (newline port))))))
+    ;; (call-with-output-string
+    ;;   (lambda (port)
+    ;; 	;(port/write-result port sexp value (object-hash value) (buffer-env))
+    ;; 	(write value port)
+    ;; 	(if nl? (newline port))
+    ;; 	(hash value)))
+    value
+    ))
 
 (define (for-each-sexp procedure string)
   (let ((input (open-input-string string)))
@@ -304,6 +326,8 @@ USA.
 	(lambda () (flush-output p)))))
 
 (define repl-port-type)
+(define *last-character-newline?* #f)
+(define *any-output?* #f)
 (define (initialize-package!)
   (set! repl-port-type
 	(make-port-type
@@ -311,12 +335,17 @@ USA.
 	    ,(lambda (port char)
 	       (write-message `(:write-string ,(string char))
 			      (port/state port))
+	       (set! *any-output?* #t)
+	       (set! *last-character-newline?* (char=? char #\newline))
 	       1))
 	   (WRITE-SUBSTRING
 	    ,(lambda (port string start end)
 	       (if (< start end)
-		   (write-message `(:write-string ,(substring string start end))
-				  (port/state port)))
+		   (let ((str (substring string start end)))
+		     (write-message `(:write-string ,str)
+				    (port/state port))
+		     (set! *any-output?* #t)
+		     (set! *last-character-newline?* (char=? (string-ref str (- (string-length str) 1)) #\newline))))
 	       (- end start))))
 	 #f))
   unspecific)
@@ -1116,5 +1145,32 @@ swank:xref
 	 x)))
 
 (define swank:completions swank:simple-completions)
+
+;; only return the object, not a list
+(define (swank:lookup-presented-object number)
+  (unhash number))
+
+(define (swank:lookup-presented-object-or-lose n)
+  (unhash (inexact->exact n)))
+
+;; depends on the implementation of swank:lookup-presented-object
+(define (cl:nth-value socket n lst)
+  lst)
+
+;; the following two are a clutch, contrib/swank-presentation.el uses #. for some forms :-/
+(eval 
+  '(define (handler:dot port db ctx char1 char2)
+     (let ((form (read port)))
+       (if (and (list? form)
+		(eq? (car form)
+		     'swank:lookup-presented-object-or-lose))
+	   (make-quotation (unhash (inexact->exact (cadr form))))
+	   form)))
+  (->environment '(runtime parser)))
+
+(eval 
+  '(vector-set! (parser-table/special runtime-parser-table) (char->integer #\.) handler:dot)
+  (->environment '(runtime parser)))
+
 
 (initialize-package!)
