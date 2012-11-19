@@ -4,7 +4,8 @@ A version of Swank for MIT/GNU Scheme that works with current SLIME CVS.
 
 * Usage
 
-Put =(load "/path/to/new/swank.scm" (->environment '(runtime swank)))= somewhere into your =~/.scheme.init=. 
+Put =(load-option 'format) (load "/path/to/new/swank.scm" (->environment '(runtime swank)))=
+somewhere into your =~/.scheme.init=.
 
 Alternatively, replace =runtime/swank.scm= in your MIT/GNU Scheme source directory with this =swank.scm= before building it, but remove the last line (because =(initialize-package!)= is run automatically in that case).
 
