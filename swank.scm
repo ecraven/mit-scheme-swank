@@ -118,6 +118,7 @@ USA.
     (with-simple-restart 'ABORT "Return to SLIME top-level."
       (lambda ()
 	(fluid-let ((*top-level-restart* (find-restart 'ABORT)))
+	  (call-with-current-continuation (lambda (k) (set! escape-to-loop k)))
 	  (process-one-message socket 0))))))
 
 (define *top-level-restart*)
@@ -151,8 +152,16 @@ USA.
 	  (let ((buffer (make-string 6)))
 	    (read-string! buffer in)
 	    (string->number buffer 16 #t)))))
-    (read-string! buffer in)
-    buffer))
+    ;; loop until all read
+    (let loop ((start 0)
+    	       (end (string-length buffer)))
+      (if (= start end)
+    	  buffer
+    	  (let ((read-chars (read-substring! buffer start end in)))
+    	    (loop
+    	     (+ start read-chars)
+    	     end))))
+    ))
 
 (define (decode-message socket packet)
   (bind-condition-handler (list condition-type:serious-condition)
@@ -194,12 +203,6 @@ USA.
 
 ;;;; Message handlers
 
-(define (fix-hashbang x)
-  (if (and (symbol? x)
-	   (string-prefix? "#!" (symbol->string x)))
-      (symbol->string x)
-      x))
-
 (define-message-handler '(':emacs-rex form datum datum index)
   (lambda (socket level sexp pstring thread id)
     thread
@@ -215,9 +218,17 @@ USA.
 		 (lambda ()
 		   (write-message `(:return (:abort ,(condition/report-string condition)) ,id) socket))))
 	 (lambda ()
-	   (write-message `(:return (:ok ,(fix-hashbang (emacs-rex socket sexp pstring id)))
+	   (write-message `(:return (:ok ,(emacs-rex socket sexp pstring id))
 				    ,id)
 			  socket)))))))
+
+(define-message-handler '(':emacs-return-string form index string)
+  (lambda (socket level unknown index string)
+    (set! *input-buffer* (open-input-string string))
+    (let ((cont (car *reading-continuations*)))
+      (set! *reading-continuations* (cdr *reading-continuations*))
+      (cont #f))))
+
 (define *index*)
 
 (define (emacs-rex socket sexp pstring id)
@@ -265,7 +276,9 @@ USA.
 ;;;; Evaluation
 
 (define (swank:interactive-eval socket string)
-  (interactive-eval (read-from-string string) socket #f))
+  (with-output-to-string
+    (lambda ()
+      (write (interactive-eval (read-from-string string) socket #f)))))
 
 (define (swank:interactive-eval-region socket string)
   (for-each-sexp (lambda (sexp) (interactive-eval sexp socket #f))
@@ -281,7 +294,7 @@ USA.
 	(write-message `(:write-string "\n" :repl-result) socket))
     (write-message `(:presentation-start ,hash-number :repl-result)
 		   socket)
-    (write-message `(:write-string ,(format #f "~a" result)
+    (write-message `(:write-string ,(format #f "~s" result)
 				   :repl-result)
 		   socket)
     (write-message `(:presentation-end ,hash-number :repl-result)
@@ -312,41 +325,81 @@ USA.
 	      (loop)))))))
 
 (define (repl-eval sexp socket)
-  (with-output-to-repl socket
+  (with-i/o-to-repl socket
     (lambda ()
       (with-repl-eval-boundary 'SWANK
 	(lambda ()
 	  (eval sexp (buffer-env)))))))
 
-(define (with-output-to-repl socket thunk)
+(define (with-i/o-to-repl socket thunk)
   (let ((p (make-port repl-port-type socket)))
-    (dynamic-wind
-	(lambda () unspecific)
-	(lambda () (with-output-to-port p thunk))
-	(lambda () (flush-output p)))))
+    (let ((trace-port (trace-output-port))
+	  (int-i/o-port (interaction-i/o-port)))
+      (dynamic-wind
+	  (lambda () (set-trace-output-port! p) (set! *output-buffer* (open-output-string)) (set-interaction-i/o-port! p)
+	     )
+	  (lambda () (with-output-to-port p (lambda () (with-input-from-port p thunk))))
+	  (lambda () (set-trace-output-port! trace-port) (set-interaction-i/o-port! int-i/o-port) (flush-output p)
+	     )))))
 
 (define repl-port-type)
 (define *last-character-newline?* #f)
 (define *any-output?* #f)
+(define *output-buffer* (open-output-string))
+(define *input-buffer* (open-input-string ""))
+(define *reading-continuations* '()) 
+(define escape-to-loop #f)
+(define *read-index* 1)
+
+(define (ensure-input port)
+  (let ((char (peek-char *input-buffer*)))
+    (if (not (eof-object? char))
+	#f
+	(call-with-current-continuation 
+	 (lambda (k)
+	   (set! *reading-continuations* (cons k *reading-continuations*))
+	   (write-message `(:read-string 1 ,*read-index*)
+			  (port/state port))
+	   (set! *read-index* (+ *read-index* 1))
+	   (escape-to-loop #f))))))
+
 (define (initialize-package!)
   (set! repl-port-type
 	(make-port-type
 	 `((WRITE-CHAR
 	    ,(lambda (port char)
-	       (write-message `(:write-string ,(string char))
-			      (port/state port))
+	       ;; (write-message `(:write-string ,(string char))
+	       ;; 		      (port/state port))
+	       (display char *output-buffer*)
 	       (set! *any-output?* #t)
 	       (set! *last-character-newline?* (char=? char #\newline))
 	       1))
+	   (READ-CHAR
+	    ,(lambda (port)
+	       (ensure-input port)
+	       (read-char *input-buffer*)))
+	   (PEEK-CHAR
+	    ,(lambda (port)
+	       (ensure-input port)
+	       (peek-char *input-buffer*)))
+	   (UNREAD-CHAR
+	    ,(lambda (port c)
+	       (ensure-input port)
+	       (unread-char c *input-buffer*)))
 	   (WRITE-SUBSTRING
 	    ,(lambda (port string start end)
 	       (if (< start end)
 		   (let ((str (substring string start end)))
-		     (write-message `(:write-string ,str)
-				    (port/state port))
+		     ;; (write-message `(:write-string ,str)
+		     ;; 		    (port/state port))
+		     (display str *output-buffer*)
 		     (set! *any-output?* #t)
 		     (set! *last-character-newline?* (char=? (string-ref str (- (string-length str) 1)) #\newline))))
-	       (- end start))))
+	       (- end start)))
+	   (FLUSH-OUTPUT
+	    ,(lambda (port)
+	       (write-message `(:write-string ,(get-output-string *output-buffer*))
+			      (port/state port)))))
 	 #f))
   unspecific)
 
@@ -386,7 +439,7 @@ USA.
 (define (swank:compile-file-for-emacs socket file load?)
   (call-compiler
    (lambda ()
-     (with-output-to-repl socket
+     (with-i/o-to-repl socket
        (lambda ()
 	 (compile-file file)))))
   (if (elisp-true? load?)
@@ -394,7 +447,7 @@ USA.
 		       (pathname-new-type file "com"))))
 
 (define (swank:load-file socket file)
-  (with-output-to-repl socket
+  (with-i/o-to-repl socket
     (lambda ()
       (load file (buffer-env))
       'loaded)))
@@ -422,6 +475,10 @@ USA.
 	 (type (environment-reference-type env symbol))
 	 (binding (if (eq? type 'normal) (environment-lookup env symbol) #f))
 	 (binding-type (if binding (get-object-type-name binding) #f))
+	 (doc (if (and (eq? type 'normal)
+		       binding)
+		  (documentation-string binding)
+		  #f))
 	 (params (if (and binding (procedure? binding)) (procedure-parameters symbol env) #f)))
     (string-append
      (format #f "~a in package ~a~a of type ~a.~%~%" (string-upcase (symbol->string symbol))
@@ -431,6 +488,9 @@ USA.
 		 (format #f " [originally defined in package ~a]" (env->pstring (procedure-environment binding)))
 		 "")
 	     (if binding-type binding-type type))
+     (if doc
+	 (format #f "~a~%~%" doc)
+	 "")
      (if binding
 	 (format #f "Bound to ~a.~%" binding)
 	 "")
@@ -522,7 +582,7 @@ USA.
       :lisp-implementation
       (:type "MIT/GNU Scheme"
        :version ,(get-subsystem-version-string "release"))
-      :version "2012-05-03"
+      :version "2012-07-13"
       :encoding
       (:coding-systems
        ("utf-8-unix" "iso-latin-1-unix")))))
@@ -560,16 +620,66 @@ USA.
 			 #f)))))
       ans)))
 
-(define (find-string-before-swank-cursor-marker expr)
+(define (find-expression-containing-swank-cursor-marker expr)
   (if (list? expr)
       (if (member 'swank::%cursor-marker% expr)
-	  (if (string? (car expr))
-	      (car expr)
-	      #f)
+	  expr
 	  (any (lambda (ex)
-		 (find-string-before-swank-cursor-marker ex))
+		 (find-expression-containing-swank-cursor-marker ex))
 	       expr))
       #f))
+
+(define (find-string-before-swank-cursor-marker expr)
+  (let ((ex (find-expression-containing-swank-cursor-marker expr)))
+    (if ex
+	(if (string? (car ex))
+	    (car ex)
+	    #f))))
+
+(define (improper-length lst)
+  (if (pair? lst)
+      (+ 1 (improper-length (cdr lst)))
+      (if (null? lst) 
+	  0
+	  1)))
+
+(define (improper->proper-list lst)
+  (if (pair? lst)
+      (cons (car lst)
+	    (improper->proper-list (cdr lst)))
+      (if (null? lst)
+	  '()
+	  (list '#!rest lst))))
+
+(define *stderr* (current-output-port))
+
+(define (wrap-item/index lst index before-marker after-marker)
+  (let loop ((i 0)
+	     (lst lst))
+    (cond ((null? (cdr lst))
+	   (list before-marker (car lst) after-marker))
+	  ((member (car lst) '(#!rest #!optional))
+	   (cons (car lst) (loop i (cdr lst))))
+	  ((= i index)
+	   (append (list before-marker (car lst) after-marker) (cdr lst)))
+	  (else
+	   (cons (car lst)
+		 (loop (+ i 1) (cdr lst))))))
+  ;; (if (>= index (improper-length lst))
+  ;;     (wrap-item/index lst (- (improper-length lst) 1) before-marker after-marker)
+  ;;     (let* ((lst (improper->proper-list lst))
+  ;; 	     (before (take lst index))
+  ;; 	     (after (if (< index (improper-length lst)) 
+  ;; 			(drop lst (+ 1 index))
+  ;; 			'()))
+  ;; 	     (item (list-ref lst index)))
+  ;; 	(append before (list before-marker item after-marker) after)))
+  )
+
+(define (highlight-at-cursor signature expr)
+  (let* ((form (find-expression-containing-swank-cursor-marker expr))
+	 (index (list-index (lambda (el) (eq? el '|swank::%cursor-marker%|)) form)))
+    (wrap-item/index (improper->proper-list signature) (- index 1) '===> '<===)))
 
 (define (swank:autodoc socket expr . params)
   socket params
@@ -577,8 +687,18 @@ USA.
     (if op-string
 	(let* ((op (string->symbol op-string))
 	       (type (environment-reference-type (buffer-env) op)))
-	  (let ((ans (procedure-parameters op (buffer-env))))
-	    (let ((answer (if ans (with-output-to-string (lambda () (write ans))) ':not-available)))
+	  (let ((ans (procedure-parameters op (buffer-env)))
+		(doc (if (and (eq? type 'normal)
+			      (environment-bound? (buffer-env) op)) 
+			 (documentation-string (environment-lookup (buffer-env) op))
+			 #f)))
+	    (let ((answer (if ans (with-output-to-string (lambda () 
+							   (let* ((ans (highlight-at-cursor ans expr)))
+							     (write ans))
+							   (if doc
+							       (begin
+								 (display "  - ")
+								 (display doc))))) ':not-available)))
 	      (list answer 't))))
 	(list ':not-available 't))))
 
@@ -667,6 +787,8 @@ swank:xref
 
 (define *sldb-state* #f)
 
+(define *restart-with-interactor?* #f)
+
 (define (invoke-sldb socket level condition)
   (fluid-let ((*sldb-state*
 	       (make-sldb-state condition (bound-restarts-for-emacs))))
@@ -675,12 +797,18 @@ swank:xref
 	(lambda ()
 	  (write-message `(:debug 0 ,level ,@(sldb-info *sldb-state* 0 20))
 			 socket)
-	  (sldb-loop level socket))
+	  (write-message `(:debug-activate 0 ,level) socket)
+	  (fluid-let ((escape-to-loop (call-with-current-continuation (lambda (k) k))))
+	    (sldb-loop level socket)))
 	(lambda ()
+	  (if *restart-with-interactor?*
+	      (begin
+		(set! *restart-with-interactor?* #t)
+		(write-message `(:return (:abort "NIL") ,*index*) socket)))
 	  (write-message `(:debug-return 0 ,(- level 1) 'NIL) socket)))))
 
 (define (sldb-loop level socket)
-  (write-message `(:debug-activate 0 ,level) socket)
+;;  (write-message `(:debug-activate 0 ,level) socket)
   (with-simple-restart 'ABORT (string "Return to SLDB level " level ".")
     (lambda ()
       (process-one-message socket level)))
@@ -716,10 +844,15 @@ swank:xref
   socket args
   (continue (sldb-state.restarts *sldb-state*)))
 
+(define (restart-has-interactor? restart)
+  (restart/interactor restart))
+
 (define (swank:invoke-nth-restart-for-emacs socket sldb-level n)
   socket sldb-level
-  (write-message `(:return (:abort "NIL") ,*index*) socket)
-  (invoke-restart (list-ref (sldb-state.restarts *sldb-state*) n)))
+  (let ((restart (list-ref (sldb-state.restarts *sldb-state*) n)))
+    (if (not (restart-has-interactor? restart))
+	(write-message `(:return (:abort "NIL") ,*index*) socket))
+    (invoke-restart-interactively restart)))
 
 (define (swank:debugger-info-for-emacs socket from to)
   socket
@@ -786,9 +919,18 @@ swank:xref
 
 (define (substream s from to)
   (let loop ((i 0) (l '()) (s s))
-    (cond ((or (= i to) (stream-null? s)) (reverse l))
+    (cond ((or (if (null? to) #f (= i to)) (stream-null? s)) (reverse l))
 	  ((< i from) (loop (+ i 1) l (stream-cdr s)))
 	  (else (loop (+ i 1) (cons (stream-car s) l) (stream-cdr s))))))
+
+(define (swank:sdlb-print-condition socket)
+  socket
+  (condition/report-string (sldb-state.condition *sldb-state*))
+  )
+
+(define (swank:inspect-current-condition socket)
+  socket
+  (inspect-object (sldb-state.condition *sldb-state*)))
 
 (define (swank:frame-locals-and-catch-tags socket frame)
   socket
@@ -872,11 +1014,11 @@ swank:xref
 	     system-global-environment
 	     (pstring->env pstring))))
     (map (lambda (symbol)
-	   `(:designator ,(string symbol " " pstring)
+	   `(:designator ,(string symbol) ;;  " " pstring
 	     ,@(case (environment-reference-type env symbol)
 		 ((UNBOUND) '())
-		 ((UNASSIGNED) `(:variable nil))
-		 ((MACRO) `(:macro nil))
+		 ((UNASSIGNED) `(:variable :not-documented))
+		 ((MACRO) `(:macro :not-documented))
 		 (else
 		  (let ((v (environment-lookup env symbol)))
 		    `(,(cond ((generic-procedure? v) ':generic-function)
@@ -1148,7 +1290,9 @@ swank:xref
 
 ;; only return the object, not a list
 (define (swank:lookup-presented-object number)
-  (unhash number))
+  ;(unhash number)
+  't
+  )
 
 (define (swank:lookup-presented-object-or-lose n)
   (unhash (inexact->exact n)))
@@ -1172,5 +1316,91 @@ swank:xref
   '(vector-set! (parser-table/special runtime-parser-table) (char->integer #\.) handler:dot)
   (->environment '(runtime parser)))
 
+;; ,in (runtime advice)
+(eval 
+ '(define trace-indentation -2)
+ (->environment '(runtime advice)))
+
+(eval '(define (trace-indent level)
+	 (display (make-string level #\space)))
+      (->environment '(runtime advice)))
+(eval '(define (trace-display port procedure arguments #!optional result)
+	 (fresh-line port)
+	 (let ((width (- (max 40 (output-port/x-size port)) 1))
+	       (write-truncated
+		(lambda (object width)
+		  (let ((output (write-to-string object width)))
+		    (if (car output)
+			(substring-fill! (cdr output) (- width 3) width #\.))
+		    (write-string (cdr output) port)))))
+	   (if (default-object? result)
+	       (begin 
+		 (set! trace-indentation (+ 2 trace-indentation))
+		 (trace-indent trace-indentation)
+		 (write-string 
+		  (format #f "(Enter (~a ~a)~%" (procedure-name procedure) (decorated-string-append "" " " "" (map (lambda (arg) (format #f "~a" arg)) arguments)))
+		  port))
+	       (begin
+		 (trace-indent trace-indentation)
+		 (set! trace-indentation (- trace-indentation 2))
+		 (write-string 
+		  (format #f " Leave ~a " (procedure-name procedure))
+		  port)
+		 (write-truncated result (- width 2))
+		 (write-string ")" port)
+		 (newline port)))))
+      (->environment '(runtime advice)))
+
+(eval '(define (procedure-name proc)
+	 (cond ((arity-dispatched-procedure? proc)
+		;; TODO
+		proc)
+	       ((compound-procedure? proc)
+		(car (lambda-components* (procedure-lambda proc) list)))
+	       ((compiled-procedure? proc)
+		(string->symbol (compiled-procedure/name proc)))
+	       ((primitive-procedure? proc)
+		(primitive-procedure-name proc))
+	       ((arity-dispatched-procedure? proc)
+		(let ((p (entity-procedure proc)))
+		  (compiled-procedure/name proc)))
+	       (else
+		(error proc))))
+      (->environment '(runtime advice)))
+
+(define (documentation-string proc)
+  "Extract the documentation string from a procedure.
+
+The documentation string is the first expression inside a procedure's body, if it is a string."
+  (if (procedure? proc)
+      (let ((code (unsyntax (procedure-lambda proc))))
+	(if (and (list? code)
+		 (> (length code) 3)
+		 (string? (list-ref code 2)))
+	    (list-ref code 2)
+	    #f))))
 
 (initialize-package!)
+
+
+;; todo:
+;; sldb-insert-frame-call-to-repl
+;; sldb-inspect-condition
+;; sldb-disassemble
+;; swank:frame-package-name
+;; swank:inspect-in-frame
+;; swank:frame-source-location
+#|
+(defun careful-symbol-value (symbol)
+   (check-type symbol symbol)
+   (restart-case (if (boundp symbol)
+                     (return-from careful-symbol-value 
+                                  (symbol-value symbol))
+                     (error 'unbound-variable
+                            :name symbol))
+     (use-value (value)
+       :report "Specify a value to use this time."
+       :interactive (lambda () (format t "Supply a value: ") (list(read)))
+       value)))
+|#
+

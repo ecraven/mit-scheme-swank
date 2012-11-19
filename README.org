@@ -73,3 +73,12 @@ The binding for compile-and-load is missing. Not implemented yet.
 ** Presentations
 Added support for "presentations". Every result is clickable in Emacs,
 which recalls the value.
+
+** Buffering
+Added buffering of output before sending to Emacs. Without this, SLIME
+is not usable for programs that write more than a few lines of output.
+
+** Debugging
+Working on debugging, added redirection of input (as well as output)
+to Emacs, though this doesn't work yet for restarts that need input
+(like USE-VALUE).
