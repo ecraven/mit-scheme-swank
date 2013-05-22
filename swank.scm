@@ -442,7 +442,8 @@ USA.
      (lambda ()
        (let ((env (buffer-env)))
          (scode-eval (compile-scode (syntax `(begin ,@sexps) env) #t)
-                     env))))))
+                     env)))
+     #f)))
 
 (define (snarf-string string)
   (let ((port (open-input-string string)))
@@ -452,24 +453,26 @@ USA.
             '()
             (cons e (loop)))))))
 
-(define (call-compiler fun)
+(define (call-compiler fun pathname)
   (let ((time #f))
     (with-timings fun
                   (lambda (run-time gc-time real-time)
                     run-time gc-time
                     (set! time real-time)
                     unspecific))
-    `(:compilation-result NIL T ,(internal-time/ticks->seconds time) NIL NIL))) ;; ec: not sure about these parameters :-/
+    `(:compilation-result NIL T ,(internal-time/ticks->seconds time) NIL ,(if pathname (->namestring (pathname-new-type pathname "com")) 'nil)))) ;; ec: not sure about these parameters :-/
 
 (define (swank:compile-file-for-emacs socket file load?)
-  (call-compiler
-   (lambda ()
-     (with-i/o-to-repl socket
-                       (lambda ()
-                         (compile-file file)))))
-  (if (elisp-true? load?)
-      (swank:load-file socket
-                       (pathname-new-type file "com"))))
+  (let ((result (call-compiler
+		 (lambda ()
+		   (with-i/o-to-repl socket
+				     (lambda ()
+				       (compile-file file))))
+		 file)))
+    (if (elisp-true? load?)
+	(swank:load-file socket
+			 (pathname-new-type file "com")))
+    result))
 
 (define (swank:load-file socket file)
   (with-i/o-to-repl socket
