@@ -459,7 +459,7 @@ USA.
                     run-time gc-time
                     (set! time real-time)
                     unspecific))
-    (list 'NIL (string (internal-time/ticks->seconds time)))))
+    `(:compilation-result NIL T ,(internal-time/ticks->seconds time) NIL NIL))) ;; ec: not sure about these parameters :-/
 
 (define (swank:compile-file-for-emacs socket file load?)
   (call-compiler
