@@ -128,11 +128,12 @@ USA.
                          (process-one-message socket 0))))))
     (if *aborted?*
         (begin
-          (write-message `(:return (:abort ,(condition/report-string *condition*)) ,*aborted-id*) socket)
+          (if (condition? *condition*)
+              (write-message `(:return (:abort ,(condition/report-string *condition*)) ,*aborted-id*) socket)
+              (write-message `(:return (:abort ,(format #f "unknown condition: ~s" *condition*)) ,(if *aborted-id* *aborted-id* 'nil)) socket))
           (set! *aborted-id* #f)
           (set! *aborted?* #f)
-          (set! *condition* #f)))
-    ))
+          (set! *condition* #f)))))
 
 (define *aborted-id* #f)
 (define *aborted?* #f)
@@ -167,7 +168,7 @@ USA.
 	  (let ((n (read-substring! buffer i (string-length buffer) in)))
 	    (if (not (exact-nonnegative-integer? n))
 		(disconnect))
-	    ;(assert (<= n (- (string-length buffer) i)))
+                                        ;(assert (<= n (- (string-length buffer) i)))
 	    (loop (+ i n))))))
   (let ((buffer
 	 (make-string
@@ -178,7 +179,7 @@ USA.
     buffer))
 
 (define (read-from-string str)
-  (with-input-from-string
+  (with-input-from-string str
       read))
 
 (define (decode-message socket packet)
@@ -192,12 +193,19 @@ USA.
                             (read-from-string packet))))
 
 (define (write-message message out)
+  (with-output-to-file "/tmp/foo.log"
+    (lambda ()
+      (display message)
+      (newline)
+      (write message)
+      (newline)))
   (write-packet (write-to-string message) out))
 
 (define (write-packet packet out)
   (let ((s (number->string (string-length packet) 16)))
     (if (> (string-length s) 6)
-        (error "Expression length exceeds 24 bits:" s))
+        (begin
+          (error "Expression length exceeds 24 bits:" s (substring packet 0 100))))
     (write-string (string-pad-left s 6 #\0) out))
   (write-string packet out)
   (flush-output out))
@@ -286,10 +294,12 @@ USA.
          (package/environment (find-package (read-from-string pstring) #t)))))
 
 (define (env->pstring env)
-  (let ((package (environment->package env)))
-    (if package
-        (write-to-string (package/name package))
-        (string anonymous-package-prefix (object-hash env)))))
+  (if (eq? unknown-environment env)
+      "unknown environment"
+      (let ((package (environment->package env)))
+	(if package
+	    (write-to-string (package/name package))
+	    (string anonymous-package-prefix (object-hash env))))))
 
 (define anonymous-package-prefix
   "environment-")
@@ -305,7 +315,7 @@ USA.
   (for-each-sexp (lambda (sexp) (interactive-eval sexp socket #f))
                  string))
 
-(define (swank:listener-eval socket string)
+(define (swank-repl:listener-eval socket string)
   (let* ((result (interactive-eval (read-from-string string)
                                    socket
                                    #f))
@@ -359,10 +369,10 @@ USA.
           (int-i/o-port (interaction-i/o-port)))
       (dynamic-wind
           (lambda () (set-trace-output-port! p) (set! *output-buffer* (open-output-string)) (set-interaction-i/o-port! p)
-	     )
+                  )
           (lambda () (with-output-to-port p (lambda () (with-input-from-port p thunk))))
           (lambda () (set-trace-output-port! trace-port) (set-interaction-i/o-port! int-i/o-port) (flush-output p)
-	     )))))
+                  )))))
 
 (define repl-port-type)
 (define *last-character-newline?* #t)
@@ -505,7 +515,9 @@ USA.
          (binding-type (if binding (get-object-type-name binding) #f))
          (doc (if (and (eq? type 'normal)
                        binding)
-                  (documentation-string binding)
+                  (and-let* ((doc (documentation-string binding))
+			     ((not (eq? doc unspecific))))
+			    doc)
                   #f))
          (params (if (and binding (procedure? binding)) (procedure-parameters symbol env) #f)))
     (string-append
@@ -513,7 +525,7 @@ USA.
              package
              (if (and binding
                       (procedure? binding))
-                 (format #f " [originally defined in package ~a]" (env->pstring (procedure-environment binding)))
+		 (format #f " [originally defined in package ~a]" (env->pstring (procedure-environment binding)))
                  "")
              (if binding-type binding-type type))
      (if doc
@@ -558,8 +570,16 @@ USA.
         ((symbol? obj) "symbol")
         ((weak-pair? obj) "weak-pair")
         ((record-type? obj) "record-type")
+	((dispatch-tag? obj) "dispatch-tag")
         ((wide-string? obj) "wide-string")
-        (else (user-object-type obj))))
+	((record? obj) "record")
+	((eq? unspecific obj) "unspecific")
+	((eq? #!aux obj) "#!aux")
+	((eq? #!rest obj) "#!rest")
+	((eq? #!optional obj) "#!optional")
+	((eq? #!key obj) "#!key")
+	((eq? (user-object-type obj) 'false) "false")
+        (else (error "get-object-type-name: unknown type" obj (user-object-type obj)))))
 
 ;;;; Miscellaneous
 
@@ -570,7 +590,7 @@ USA.
     (let ((pstring (env->pstring env)))
       (list pstring pstring))))
 
-(define (swank:create-repl socket . args)
+(define (swank-repl:create-repl socket . args)
   socket args
   (let ((pstring (env->pstring (->environment '(user)))))
     (list pstring pstring)))
@@ -606,14 +626,15 @@ USA.
   socket
   (let ((pstring (env->pstring (buffer-env))))
     `(:pid ,(unix/current-pid)
+           :style :spawn
+           :encoding (:coding-systems ("utf-8-unix"))
+           :lisp-implementation (:type "MIT/GNU Scheme" :name "mit-scheme" :version ,(get-subsystem-version-string "release") :program "/usr/bin/mit-scheme")
+           :machine (:instance ,(get-host-name) :type "X86-64")
+           :features (:swank)
+           :modules ("SWANK-ARGLISTS" "SWANK-REPL" "SWANK-PRESENTATIONS")
            :package (:name ,pstring :prompt ,pstring)
-           :lisp-implementation
-           (:type "MIT/GNU Scheme"
-                  :version ,(get-subsystem-version-string "release"))
-           :version "2012-07-13"
-           :encoding
-           (:coding-systems
-            ("utf-8-unix" "iso-latin-1-unix")))))
+           :version "2015-02-19"
+           )))
 
 (define (swank:swank-require socket packages)
   socket
@@ -731,10 +752,93 @@ USA.
   socket filename
   'NIL)
 
-;; M-. is beyond my capabilities.
+(define *mit-scheme-sources-location* #f)
+;; (->pathname "/home/nex/mit-scheme/src/")
+
+(define (find-file+position-of-definition object name)
+  (let ((file
+         (if (and (entity? object)
+                  (procedure? object))
+             (receive (a b) (compiled-entry/filename-and-index (entity-procedure object)) a)
+             (if (compiled-procedure? object)
+                 (receive (a b) (compiled-entry/filename-and-index object) a)
+                 #f))))
+    (let ((scm-file (if (and file
+                             (string-suffix? ".inf" file))
+                        (string-append (substring file 0 (- (string-length file) 3)) "scm")
+                        file)))
+      (if (and scm-file
+               (file-exists? scm-file))
+          (find-definition-position-in-file scm-file object name)
+          (let ((scm-file (if scm-file (find-mit-scheme-sources-file scm-file) #f)))
+            (if (and scm-file
+                     (file-exists? scm-file))
+                (find-definition-position-in-file scm-file object name)
+                'nil))))))
+
+(define (read-file-lines filename)
+  (with-input-from-file filename
+    (lambda ()
+      (let loop ((line (read-line))
+                 (lines '()))
+        (if (eof-object? line)
+            (reverse lines)
+            (loop (read-line)
+                  (cons line lines)))))))
+
+(define (compiled-entity-name object)
+  (if (and (entity? object)
+           (procedure? object))
+      (compiled-procedure/name (entity-procedure object))
+      (compiled-procedure/name object)))
+
+;; try to find the definition of object in file..
+;; for now, try to find a line that has ".*(define.* (?<name>"
+(define (find-definition-position-in-file file object name)
+  (define (find-pos file object)
+    (let ((file-lines (read-file-lines file)))
+      (let loop ((lines file-lines)
+                 (count 0))
+        (if (null? lines)
+            (values 0 "")
+            (let ((match (re-string-search-forward (string-append ".*(define.* (?" name) (car lines))))
+              (if match
+                  (values count (car lines))
+                  (loop (cdr lines)
+                        (+ count (string-length (car lines)) 1)))))))) ;; 1 for new-line
+  (receive (pos snippet)
+      (find-pos file object)
+    `((,(string-append "(define " name ")")
+       (:location
+        (:file ,file)
+        (:position ,(+ 1 pos)) ;; extra new-line
+        (:snippet ,snippet)
+        )))))
+
+(define (find-mit-scheme-sources-file filename)
+  (if *mit-scheme-sources-location*
+      (let* ((pathname (->pathname filename))
+             (directory (pathname-directory pathname)))
+        (let loop ((pathname (pathname-new-type (pathname-new-name *mit-scheme-sources-location* (pathname-name filename)) (pathname-type filename)))
+                   (directories (cdr directory)))
+	  (format #t "pathname: ~a~%directories: ~a~%" pathname directories)
+          (if (null? directories)
+              #f
+              (let ((new-pathname (pathname-new-directory pathname (append (pathname-directory pathname)
+                                                                           directories))))
+		(format #t "new-pathname: ~a~%" new-pathname)
+                (if (file-exists? new-pathname)
+                    (->namestring new-pathname)
+                    (loop pathname
+                          (cdr directories)))))))
+      #f))
+
+
+
+;; M-. is implemented heuristically. For compiled entries, the location of the debugging info file is taken and a similarly-named file is sought.
 (define (swank:find-definitions-for-emacs socket name)
   socket name
-  'NIL)
+  (find-file+position-of-definition (environment-lookup (buffer-env) (string->symbol name)) name))
 
 #|
 ;;; List of names obtained by grepping through "slime.el" and
@@ -1032,28 +1136,123 @@ swank:xref
           ""
           strings))
 
+;;;; Fuzzy Completions
+(define (swank:fuzzy-completions socket string pstring . parameters)
+  socket
+  (let ((completions (all-fuzzy-completions string (pstring->env pstring))))
+    (list completions 'nil)))
+
+;; bfgctmsp
+;; b=global
+;; f=function
+;; g=generic
+;; c=class
+;; t=type
+;; m=macro
+;; s=special
+;; p=package
+(define (binding-type-string type binding-type)
+  (string-pad-right (case type
+		      ((normal)
+		       binding-type)
+		      ((macro)
+		       "macro")
+		      ((unassigned)
+		       "unassigned")
+		      (else
+		       "unknown"))
+		    15
+		    #\space))
+
+(define (match-score prefix name)
+  (let* ((name-len (string-length name))
+	 (prefix-len (string-length prefix))
+	 (difference (- name-len prefix-len)))
+    (- 100 (* (/ difference 50) 100))))
+(define (all-fuzzy-completions prefix environment)
+  (let ((prefix
+         (if (environment-lookup environment '*PARSER-CANONICALIZE-SYMBOLS?*)
+             (string-downcase prefix)
+             prefix))
+        (completions '()))
+    (for-each-interned-symbol
+     (lambda (symbol)
+       (if (and (substring? prefix (symbol-name symbol))
+                (environment-bound? environment symbol))
+	   (let* ((type (environment-reference-type environment symbol))
+		  (unbound (list 'unbound))
+		  (binding (if (eq? type 'normal) (environment-lookup environment symbol) unbound))
+		  (binding-type (if (not (eq? binding unbound)) (get-object-type-name binding) #f))
+		  (match-score (match-score prefix (symbol-name symbol))))
+	     (set! completions (cons (list (symbol-name symbol) (number->string match-score) '() (binding-type-string type binding-type)) completions))))
+       unspecific))
+    (sort completions (lambda (a b) (> (string->number (second a)) (string->number (second b)))))))
+
+(define (swank:fuzzy-completion-selected socket string form)
+  'nil)
+
 ;;;; Apropos
 
+(define unknown-environment (cons 'unknown 'environment))
+(define (safe-procedure-environment p)
+  (let ((p (ignore-errors (lambda () (procedure-environment p)))))
+    (if (condition? p)
+	unknown-environment
+	p)))
 (define (swank:apropos-list-for-emacs socket text external-only? case-sensitive?
                                       pstring)
   socket case-sensitive?
-  (let ((env
-         (if (elisp-true? external-only?)
-             system-global-environment
-             (pstring->env pstring))))
-    (map (lambda (symbol)
-           `(:designator ,(string symbol) ;;  " " pstring
-                         ,@(case (environment-reference-type env symbol)
-                             ((UNBOUND) '())
-                             ((UNASSIGNED) `(:variable :not-documented))
-                             ((MACRO) `(:macro :not-documented))
-                             (else
-                              (let ((v (environment-lookup env symbol)))
-                                `(,(cond ((generic-procedure? v) ':generic-function)
-                                         ((procedure? v) ':function)
-                                         (else ':variable))
-                                  ,(with-output-to-string (lambda () (write v)))))))))
-         (reverse (apropos-list text env #t)))))
+  (if (elisp-true? external-only?)
+      (let ((env
+	     (if (elisp-true? external-only?)
+		 system-global-environment
+		 (pstring->env pstring))))
+	(map (lambda (symbol)
+	       `(:designator ,(string symbol) ;;  " " pstring
+			     ,@(case (environment-reference-type env symbol)
+				 ((UNBOUND) '())
+				 ((UNASSIGNED) `(:variable :not-documented))
+				 ((MACRO) `(:macro :not-documented))
+				 (else
+				  (let ((v (environment-lookup env symbol)))
+				    `(,(cond ((generic-procedure? v) ':generic-function)
+					     ((procedure? v) ':function)
+					     (else ':variable))
+				      ,(string-append (write-to-string v) (if (procedure? v) (format #f " in package ~a" (env->pstring (safe-procedure-environment v))) ""))))))))
+	     (reverse (apropos-list text env #t))))
+      (let ((seen (make-hash-table)))
+	(sort (append-map (lambda (p)
+			    (let ((env (package/environment p)))
+			      (filter identity-procedure (map (lambda (symbol)
+						   (let* ((type (environment-reference-type env symbol))
+							  (v (if (memq type '(unbound unassigned macro)) #f (environment-lookup env symbol))))
+						     (if (or (not v)
+							     (and v
+								  (not (hash-table/get seen v #f))))
+							 (begin
+							   (hash-table/put! seen v #t)
+							   `(:designator ,(string-append (string symbol) " in " (if (and (procedure? v) (not (primitive-procedure? v))) (env->pstring (safe-procedure-environment v)) (env->pstring env)))
+									 ,@(case (environment-reference-type env symbol)
+									     ((UNBOUND) '())
+									     ((UNASSIGNED) `(:variable :not-documented))
+									     ((MACRO) `(:macro :not-documented))
+									     (else
+									      (let ((v (environment-lookup env symbol)))
+										`(,(cond ((generic-procedure? v) ':generic-function)
+											 ((procedure? v) ':function)
+											 (else ':variable))
+										  ,(string-append (write-to-string v))))))))
+							 #f)))
+						 (filter (lambda (name)
+							   (substring? text (symbol->string name)))
+							 (environment-bound-names env))))))
+			  (all-packages))
+	      (lambda (a b)
+		(or (< (string-length (cadr a))
+		       (string-length (cadr b)))
+		    (and (= (string-length (cadr a))
+			    (string-length (cadr b)))
+			 (string<? (cadr a) (cadr b)))))))))
 
 (define (swank:list-all-package-names socket . args)
   socket args
@@ -1061,7 +1260,7 @@ swank:xref
        (all-packages)))
 
 (define (all-packages)
-  (let loop ((package system-global-package))
+  (let loop ((package (name->package '()))) ;;  system-global-package
     (cons package
           (append-map loop (package/children package)))))
 
@@ -1081,6 +1280,10 @@ swank:xref
 (define (reset-inspector)
   (set! istate #f)
   unspecific)
+
+(define (swank:init-presentations socket)
+  ;; TODO
+  '())
 
 (define (swank:init-inspector socket string)
   socket
@@ -1397,3 +1600,9 @@ The documentation string is the first expression inside a procedure's body, if i
             #f))))
 
 (initialize-package!)
+
+#|
+to find file of compiled-entry:
+(receive (a b) (compiled-entry/filename-and-index list) a)
+(receive (a b) (compiled-entry/filename-and-index (entity-procedure +)) a)
+|#
