@@ -120,6 +120,7 @@ USA.
        (with-restart 'ABORT "Return to SLIME top-level."
                      (lambda ()
                        (set! *aborted?* #t)
+		       (write-message `(:return (:abort "NIL") ,*current-id*) socket)
                        (continuation unspecific))
                      values
                      (lambda ()
@@ -136,6 +137,7 @@ USA.
           (set! *condition* #f)))))
 
 (define *aborted-id* #f)
+(define *current-id* #f)
 (define *aborted?* #f)
 (define *condition* #f)
 (define *top-level-restart*)
@@ -232,6 +234,7 @@ USA.
 (define-message-handler '(':emacs-rex form datum datum index)
   (lambda (socket level sexp pstring thread id)
     thread
+    (set! *current-id* id)
     (call-with-current-continuation
      (lambda (k)
        (bind-condition-handler (list condition-type:serious-condition)
