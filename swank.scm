@@ -182,7 +182,7 @@ USA.
 
 (define (read-from-string str)
   (with-input-from-string str
-      read))
+    read))
 
 (define (decode-message socket packet)
   (bind-condition-handler (list condition-type:serious-condition)
@@ -318,25 +318,28 @@ USA.
   (for-each-sexp (lambda (sexp) (interactive-eval sexp socket #f))
                  string))
 
+(define (present-thing socket result)
+  (let ((hash-number (hash result)))
+    (if (and *any-output?*
+	     (not *last-character-newline?*))
+	(write-message `(:write-string "\n" :repl-result) socket))
+    (write-message `(:presentation-start ,hash-number :repl-result)
+		   socket)
+    (write-message `(:write-string ,(format #f "~s" result)
+				   :repl-result)
+		   socket)
+    (write-message `(:presentation-end ,hash-number :repl-result)
+		   socket)
+    (write-message `(:write-string "\n" :repl-result)
+		   socket)
+    (set! *last-character-newline?* #t)
+    (set! *any-output?* #f)))
+
 (define (swank-repl:listener-eval socket string)
   (let* ((result (interactive-eval (read-from-string string)
                                    socket
-                                   #f))
-         (hash-number (hash result)))
-    (if (and *any-output?*
-             (not *last-character-newline?*))
-        (write-message `(:write-string "\n" :repl-result) socket))
-    (write-message `(:presentation-start ,hash-number :repl-result)
-                   socket)
-    (write-message `(:write-string ,(format #f "~s" result)
-                                   :repl-result)
-                   socket)
-    (write-message `(:presentation-end ,hash-number :repl-result)
-                   socket)
-    (write-message `(:write-string "\n" :repl-result)
-                   socket)
-    (set! *last-character-newline?* #t)
-    (set! *any-output?* #f))
+                                   #f)))
+    (present-thing socket result))
   'NIL)
 
 (define (interactive-eval sexp socket nl?)
@@ -864,14 +867,12 @@ swank:find-source-location-for-emacs
 swank:frame-source-location
 swank:inspect-current-condition
 swank:inspect-in-frame
-swank:inspector-nth-part
 swank:inspector-reinspect
 swank:inspector-toggle-verbose
 swank:io-speed-test
 swank:kill-nth-thread
 swank:list-threads
 swank:pprint-eval-string-in-frame
-swank:pprint-inspector-part
 swank:profile-package
 swank:profile-report
 swank:profile-reset
@@ -1227,28 +1228,28 @@ swank:xref
 	(sort (append-map (lambda (p)
 			    (let ((env (package/environment p)))
 			      (filter identity-procedure (map (lambda (symbol)
-						   (let* ((type (environment-reference-type env symbol))
-							  (v (if (memq type '(unbound unassigned macro)) #f (environment-lookup env symbol))))
-						     (if (or (not v)
-							     (and v
-								  (not (hash-table/get seen v #f))))
-							 (begin
-							   (hash-table/put! seen v #t)
-							   `(:designator ,(string-append (string symbol) " in " (if (and (procedure? v) (not (primitive-procedure? v))) (env->pstring (safe-procedure-environment v)) (env->pstring env)))
-									 ,@(case (environment-reference-type env symbol)
-									     ((UNBOUND) '())
-									     ((UNASSIGNED) `(:variable :not-documented))
-									     ((MACRO) `(:macro :not-documented))
-									     (else
-									      (let ((v (environment-lookup env symbol)))
-										`(,(cond ((generic-procedure? v) ':generic-function)
-											 ((procedure? v) ':function)
-											 (else ':variable))
-										  ,(string-append (write-to-string v))))))))
-							 #f)))
-						 (filter (lambda (name)
-							   (substring? text (symbol->string name)))
-							 (environment-bound-names env))))))
+								(let* ((type (environment-reference-type env symbol))
+								       (v (if (memq type '(unbound unassigned macro)) #f (environment-lookup env symbol))))
+								  (if (or (not v)
+									  (and v
+									       (not (hash-table/get seen v #f))))
+								      (begin
+									(hash-table/put! seen v #t)
+									`(:designator ,(string-append (string symbol) " in " (if (and (procedure? v) (not (primitive-procedure? v))) (env->pstring (safe-procedure-environment v)) (env->pstring env)))
+										      ,@(case (environment-reference-type env symbol)
+											  ((UNBOUND) '())
+											  ((UNASSIGNED) `(:variable :not-documented))
+											  ((MACRO) `(:macro :not-documented))
+											  (else
+											   (let ((v (environment-lookup env symbol)))
+											     `(,(cond ((generic-procedure? v) ':generic-function)
+												      ((procedure? v) ':function)
+												      (else ':variable))
+											       ,(string-append (write-to-string v))))))))
+								      #f)))
+							      (filter (lambda (name)
+									(substring? text (symbol->string name)))
+								      (environment-bound-names env))))))
 			  (all-packages))
 	      (lambda (a b)
 		(or (< (string-length (cadr a))
@@ -1341,6 +1342,26 @@ swank:xref
   socket
   (inspect-object (hash-table/get (istate-parts istate) index 'no-such-part)))
 
+(define listener-saved-value)
+(define (swank-repl:listener-save-value socket function . params)
+  (let ((function (eval function (->environment '(runtime swank)))))
+    (set! listener-saved-value (apply function socket params))
+    't))
+(define (swank-repl:listener-get-value socket)
+  socket
+  (present-thing socket listener-saved-value)
+  'nil)
+
+(define (swank:pprint-inspector-part socket index)
+  socket
+  (with-output-to-string
+    (lambda ()
+      (pp (hash-table/get (istate-parts istate) index 'no-such-part)))))
+
+(define (swank:inspector-nth-part socket index)
+  socket
+  (hash-table/get (istate-parts istate) index 'no-such-part))
+
 (define (swank:quit-inspector socket)
   socket
   (reset-inspector))
@@ -1376,8 +1397,15 @@ swank:xref
         ((pair? o) (inspect-pair o))
         ;;((system-pair? o) (inspect-system-pair o))
         ((probably-scode? o) (inspect-scode o))
+	((record? o) (inspect-record o))
         (else (inspect-fallback o))))
 
+(define (inspect-record o)
+  (let ((type (record-type-descriptor o)))
+    (cons-stream (iline "Record of type" type)
+		 (stream-map (lambda (name)
+			       (iline name ((record-accessor type name) o)))
+			     (apply stream (record-type-field-names type) )))))
 (define (inspect-fallback o)
   (cons-stream (iline "Object" o)
                (stream)))
@@ -1538,11 +1566,41 @@ swank:xref
  '(vector-set! (parser-table/special runtime-parser-table) (char->integer #\.) handler:dot)
  (->environment '(runtime parser)))
 
+;;;; Tracing
+(define (swank::from-string string)
+  (environment-lookup (buffer-env) (string->symbol string)))
+(define *traced* '())
+(define (swank-trace-dialog:dialog-toggle-trace socket object)
+  (if (memq object *traced*)
+      (begin
+	(set! *traced* (delete object *traced*))
+	(format #f "~s is now untraced for trace dialog" (procedure-name object)))
+      (begin
+	(set! *traced* (cons object *traced*))
+	(format #f "~s is now traced for trace dialog" (procedure-name object)))))
+(define (swank-trace-dialog:dialog-untrace symbol)
+  (set! *traced* (delete (swank::from-string (symbol->string symbol)) *traced*)))
+
+(define (swank-trace-dialog:dialog-untrace-all)
+  (set! *traced* '()))
+(define-syntax cl:progn
+  (syntax-rules ()
+    ((cl:progn a b ...)
+     (begin a b ...))))
+
 ;; ,in (runtime advice)
 (eval
  '(define trace-indentation -2)
  (->environment '(runtime advice)))
-
+(define (swank-trace-dialog:report-specs #!optional socket) ;; may be called inside cl:progn when hitting the untrace button in the trace dialog
+  socket
+  (if (null? *traced*)
+      'nil
+      (map (lambda (el)
+	     (procedure-name el))
+	   *traced*)))
+(define (swank-trace-dialog:report-total socket)
+  0)
 (eval '(define (trace-indent level)
          (display (make-string level #\space)))
       (->environment '(runtime advice)))
@@ -1575,20 +1633,19 @@ swank:xref
 
 (eval '(define (procedure-name proc)
          (cond ((arity-dispatched-procedure? proc)
-                ;; TODO
-                proc)
+                (let ((p (entity-procedure proc)))
+                  (procedure-name p)))
                ((compound-procedure? proc)
                 (car (lambda-components* (procedure-lambda proc) list)))
                ((compiled-procedure? proc)
                 (string->symbol (compiled-procedure/name proc)))
                ((primitive-procedure? proc)
                 (primitive-procedure-name proc))
-               ((arity-dispatched-procedure? proc)
-                (let ((p (entity-procedure proc)))
-                  (compiled-procedure/name proc)))
                (else
                 (error proc))))
       (->environment '(runtime advice)))
+
+(define procedure-name (access procedure-name (->environment '(runtime advice))))
 
 (define (documentation-string proc)
   "Extract the documentation string from a procedure.
