@@ -636,7 +636,7 @@ USA.
            :features (:swank)
            :modules ("SWANK-ARGLISTS" "SWANK-REPL" "SWANK-PRESENTATIONS")
            :package (:name ,pstring :prompt ,pstring)
-           :version "2015-02-19"
+           :version "2015-06-24"
            )))
 
 (define (swank:swank-require socket packages)
