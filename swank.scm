@@ -141,7 +141,7 @@ USA.
 (define *current-id* #f)
 (define *aborted?* #f)
 (define *condition* #f)
-(define *top-level-restart*)
+(define *top-level-restart* (make-fluid #f))
 
 (define (get-current-environment)
   (nearest-repl/environment))
@@ -150,13 +150,13 @@ USA.
   (set-repl/environment! (nearest-repl) environment))
 
 (define (top-level-abort)
-  (invoke-restart *top-level-restart*))
+  (invoke-restart (fluid *top-level-restart*)))
 
 (define (bound-restarts-for-emacs)
   (let loop ((restarts (bound-restarts)))
     (if (pair? restarts)
         (cons (car restarts)
-              (if (eq? (car restarts) *top-level-restart*)
+              (if (eq? (car restarts) (fluid *top-level-restart*))
                   '()
                   (loop (cdr restarts))))
         '())))
@@ -262,7 +262,7 @@ USA.
       (set! *reading-continuations* (cdr *reading-continuations*))
       (cont #f))))
 
-(define *index*)
+(define *index* (make-fluid #f))
 
 (define (emacs-rex socket sexp pstring id)
   (let-fluids *buffer-pstring* pstring
@@ -271,18 +271,18 @@ USA.
                 (eval (cons* (car sexp) socket (map quote-special (cdr sexp)))
                       swank-env))))
 
-(define *buffer-pstring*)
+(define *buffer-pstring* (make-fluid #f))
 
 (define swank-env
   (the-environment))
 
 (define (buffer-env)
-  (pstring->env *buffer-pstring*))
+  (pstring->env (fluid *buffer-pstring*)))
 
 (define (pstring->env pstring)
   (cond ((or (not (string? pstring))
-             (not (string? *buffer-pstring*))
-             (string-ci=? *buffer-pstring* "COMMON-LISP-USER"))
+             (not (string? (fluid *buffer-pstring*)))
+             (string-ci=? (fluid *buffer-pstring*) "COMMON-LISP-USER"))
          (get-current-environment))
         ((string-prefix? anonymous-package-prefix pstring)
          (let ((object
@@ -950,7 +950,7 @@ swank:xref
   condition
   restarts)
 
-(define *sldb-state* #f)
+(define *sldb-state* (make-fluid #f))
 
 
 (define (invoke-sldb socket level condition)
@@ -969,7 +969,7 @@ swank:xref
                     (lambda ()
                       (for-each (lambda (index)
                                   (write-message `(:return (:abort "NIL") ,index) socket))
-                                *open-restart-abort-indexes*)
+                                (fluid *open-restart-abort-indexes*))
                       (write-message `(:debug-return 0 ,(- level 1) 'NIL) socket))))))
 
 (define (sldb-loop level socket)
@@ -998,7 +998,7 @@ swank:xref
                 'NIL)
           (sldb-restarts rs)
           (sldb-backtrace c start end)
-          (list *index*))))
+          (list (fluid *index*)))))
 
 (define (sldb-restarts restarts)
   (map (lambda (r)
@@ -1022,11 +1022,11 @@ swank:xref
 (define (restart-has-interactor? restart)
   (restart/interactor restart))
 
-(define *open-restart-abort-indexes* '())
+(define *open-restart-abort-indexes* (make-fluid '()))
 (define (swank:invoke-nth-restart-for-emacs socket sldb-level n)
   socket sldb-level
   (let ((restart (list-ref (sldb-state.restarts *sldb-state*) n)))
-    (set! *open-restart-abort-indexes* (cons *index* *open-restart-abort-indexes*))
+    (set! *open-restart-abort-indexes* (make-fluid (cons (fluid *index*) (fluid *open-restart-abort-indexes*))))
     (invoke-restart-interactively restart)))
 
 (define (swank:debugger-info-for-emacs socket from to)
