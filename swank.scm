@@ -124,9 +124,10 @@ USA.
                        (continuation unspecific))
                      values
                      (lambda ()
-                       (fluid-let ((*top-level-restart* (find-restart 'ABORT)))
-                         (call-with-current-continuation (lambda (k) (set! escape-to-loop k)))
-                         (process-one-message socket 0))))))
+                       (let-fluid *top-level-restart* (find-restart 'ABORT)
+                                  (lambda ()
+                                    (call-with-current-continuation (lambda (k) (set! escape-to-loop k)))
+                                    (process-one-message socket 0)))))))
     (if *aborted?*
         (begin
           (if (condition? *condition*)
@@ -195,12 +196,12 @@ USA.
                             (read-from-string packet))))
 
 (define (write-message message out)
-  (with-output-to-file "/tmp/foo.log"
-    (lambda ()
-      (display message)
-      (newline)
-      (write message)
-      (newline)))
+  ;; (with-output-to-file "/tmp/foo.log"
+  ;;   (lambda ()
+  ;;     (display message)
+  ;;     (newline)
+  ;;     (write message)
+  ;;     (newline)))
   (write-packet (write-to-string message) out))
 
 (define (write-packet packet out)
@@ -264,10 +265,11 @@ USA.
 (define *index*)
 
 (define (emacs-rex socket sexp pstring id)
-  (fluid-let ((*buffer-pstring* pstring)
-              (*index* id))
-    (eval (cons* (car sexp) socket (map quote-special (cdr sexp)))
-          swank-env)))
+  (let-fluids *buffer-pstring* pstring
+              *index* id
+              (lambda ()
+                (eval (cons* (car sexp) socket (map quote-special (cdr sexp)))
+                      swank-env))))
 
 (define *buffer-pstring*)
 
@@ -318,11 +320,47 @@ USA.
   (for-each-sexp (lambda (sexp) (interactive-eval sexp socket #f))
                  string))
 
+(define-structure swank-image type file data string)
+
+(define (base64-encode string)
+  (let ((out (open-output-string)))
+    (run-shell-command "base64 -w 0"
+		       'input (open-input-string string)
+		       'output out)
+    (string-trim (get-output-string out))))
+
+(define (encode-swank-image-data str)
+  (base64-encode str))
+
+(define *image-converters* '())
+
+(define (register-image-converter! predicate converter)
+  (set! *image-converters* (cons (cons predicate converter) *image-converters*)))
+
+(define (convert-to-swank-image thing)
+  (if (swank-image? thing)
+      thing
+      (let loop ((conv *image-converters*))
+	(if (null? conv)
+	    #f
+	    (if ((caar conv) thing)
+		((cdar conv) thing)
+		(loop (cdr conv)))))))
+
 (define (present-thing socket result)
   (let ((hash-number (hash result)))
     (if (and *any-output?*
 	     (not *last-character-newline?*))
 	(write-message `(:write-string "\n" :repl-result) socket))
+    (let ((swank-image (convert-to-swank-image result)))
+      (if swank-image
+	  (begin
+	    (if (swank-image-file swank-image)
+		(write-message `(:write-image ((:type ,(swank-image-type swank-image) ,@(list ':file (swank-image-file swank-image)))) ,(swank-image-string swank-image))
+			       socket)
+		(write-message `(:write-image ((:type ,(swank-image-type swank-image) ,@(list ':data (encode-swank-image-data (swank-image-data swank-image))))) ,(swank-image-string swank-image))
+			       socket))
+	    (write-message `(:write-string "\n" :repl-result) socket))))
     (write-message `(:presentation-start ,hash-number :repl-result)
 		   socket)
     (write-message `(:write-string ,(format #f "~s" result)
@@ -375,10 +413,10 @@ USA.
           (int-i/o-port (interaction-i/o-port)))
       (dynamic-wind
           (lambda () (set-trace-output-port! p) (set! *output-buffer* (open-output-string)) (set-interaction-i/o-port! p)
-                  )
+             )
           (lambda () (with-output-to-port p (lambda () (with-input-from-port p thunk))))
           (lambda () (set-trace-output-port! trace-port) (set-interaction-i/o-port! int-i/o-port) (flush-output p)
-                  )))))
+             )))))
 
 (define repl-port-type)
 (define *last-character-newline?* #t)
@@ -639,7 +677,7 @@ USA.
            :features (:swank)
            :modules ("SWANK-ARGLISTS" "SWANK-REPL" "SWANK-PRESENTATIONS")
            :package (:name ,pstring :prompt ,pstring)
-           :version "2015-06-24"
+           :version "2015-12-13"
            )))
 
 (define (swank:swank-require socket packages)
@@ -916,22 +954,23 @@ swank:xref
 
 
 (define (invoke-sldb socket level condition)
-  (fluid-let ((*sldb-state*
-               (make-sldb-state condition (bound-restarts-for-emacs)))
-              (*open-restart-abort-indexes* '()))
-    (dynamic-wind
-        (lambda () #f)
-        (lambda ()
-          (write-message `(:debug 0 ,level ,@(sldb-info *sldb-state* 0 20))
-                         socket)
-          (write-message `(:debug-activate 0 ,level) socket)
-          (fluid-let ((escape-to-loop (call-with-current-continuation (lambda (k) k))))
-            (sldb-loop level socket)))
-        (lambda ()
-          (for-each (lambda (index)
-                      (write-message `(:return (:abort "NIL") ,index) socket))
-                    *open-restart-abort-indexes*)
-          (write-message `(:debug-return 0 ,(- level 1) 'NIL) socket)))))
+  (let-fluids *sldb-state* (make-sldb-state condition (bound-restarts-for-emacs))
+              *open-restart-abort-indexes* '()
+              (lambda ()
+                (dynamic-wind
+                    (lambda () #f)
+                    (lambda ()
+                      (write-message `(:debug 0 ,level ,@(sldb-info *sldb-state* 0 20))
+                                     socket)
+                      (write-message `(:debug-activate 0 ,level) socket)
+                      (let-fluid escape-to-loop (call-with-current-continuation (lambda (k) k))
+                                 (lambda ()
+                                   (sldb-loop level socket))))
+                    (lambda ()
+                      (for-each (lambda (index)
+                                  (write-message `(:return (:abort "NIL") ,index) socket))
+                                *open-restart-abort-indexes*)
+                      (write-message `(:debug-return 0 ,(- level 1) 'NIL) socket))))))
 
 (define (sldb-loop level socket)
   (call-with-current-continuation
@@ -1038,14 +1077,15 @@ swank:xref
     (cond ((debugging-info/compiled-code? expression)
            (write-string ";unknown compiled code" port))
           ((not (debugging-info/undefined-expression? expression))
-           (fluid-let ((*unparse-primitives-by-name?* #t))
-             (write
-              (unsyntax
-               (if (or (debugging-info/undefined-expression? subexpression)
-                       (debugging-info/unknown-expression? subexpression))
-                   expression
-                   subexpression))
-              port)))
+           (let-fluid *unparse-primitives-by-name?* #t
+                      (lambda ()
+                        (write
+                         (unsyntax
+                          (if (or (debugging-info/undefined-expression? subexpression)
+                                  (debugging-info/unknown-expression? subexpression))
+                              expression
+                              subexpression))
+                         port))))
           ((debugging-info/noise? expression)
            (write-string ";" port)
            (write-string ((debugging-info/noise expression) #f)
@@ -1398,7 +1438,29 @@ swank:xref
         ;;((system-pair? o) (inspect-system-pair o))
         ((probably-scode? o) (inspect-scode o))
 	((record? o) (inspect-record o))
+	((integer? o) (inspect-integer o))
+	((char? o) (inspect-char o))
+	((symbol? o) (inspect-symbol o))
         (else (inspect-fallback o))))
+
+(define (inspect-symbol s)
+  (stream (iline "Symbol" s)))
+(define (inspect-char c)
+  (stream (iline "Char code" (char->integer c))
+	  (iline "Lower cased" (char-downcase c))
+	  (iline "Upper cased" (char-upcase c))))
+(define (inspect-integer n)
+  (stream
+   (format #f "Value: ~a = #x~a = #o~a = #b~a~%" n (number->string n 16) (number->string n 8) (number->string n 2)) ;; = 4.e+0
+   (iline "Code-char" (integer->char n))
+   ;; (:value "#\\Eot" 1)
+   ;; "\n" "Integer-length" ": "
+   ;; (:value "3" 2)
+   ;; (if (< epoch n)
+   ;;     (iline "Decoded-time" (universal-time->global-decoded-time n))
+   ;;     (format #f "Too small for universal time (min. ~a)" epoch))
+   ;;    (:value "\"1900-01-01T01:00:04+01:00\"" 3)
+   ))
 
 (define (inspect-record o)
   (let ((type (record-type-descriptor o)))
@@ -1517,10 +1579,11 @@ swank:xref
 (define (pprint-to-string o)
   (call-with-output-string
    (lambda (p)
-     (fluid-let ((*unparser-list-breadth-limit* 10)
-                 (*unparser-list-depth-limit* 4)
-                 (*unparser-string-length-limit* 100))
-       (pp o p)))))
+     (let-fluids *unparser-list-breadth-limit* 10
+                 *unparser-list-depth-limit* 4
+                 *unparser-string-length-limit* 100
+                 (lambda ()
+                   (pp o p))))))
 
 ;; quote keywords, t and nil
 (define (quote-special x)
@@ -1562,27 +1625,65 @@ swank:xref
           form)))
  (->environment '(runtime parser)))
 
-(eval
- '(vector-set! (parser-table/special runtime-parser-table) (char->integer #\.) handler:dot)
- (->environment '(runtime parser)))
+;; TODO: fix this
+;; (eval
+;;  '(vector-set! (parser-table/special runtime-parser-table) (char->integer #\.) handler:dot)
+;;  (->environment '(runtime parser)))
 
 ;;;; Tracing
+(define-structure itrace id parent-id function params returns)
+
 (define (swank::from-string string)
   (environment-lookup (buffer-env) (string->symbol string)))
-(define *traced* '())
+(define *traced-functions* '())
 (define (swank-trace-dialog:dialog-toggle-trace socket object)
-  (if (memq object *traced*)
+  (if (memq object *traced-functions*)
       (begin
-	(set! *traced* (delete object *traced*))
+	(set! *traced-functions* (delete object *traced-functions*))
+	(internal-untrace! object)
 	(format #f "~s is now untraced for trace dialog" (procedure-name object)))
       (begin
-	(set! *traced* (cons object *traced*))
+	(set! *traced-functions* (cons object *traced-functions*))
+	(internal-trace! object)
 	(format #f "~s is now traced for trace dialog" (procedure-name object)))))
-(define (swank-trace-dialog:dialog-untrace symbol)
-  (set! *traced* (delete (swank::from-string (symbol->string symbol)) *traced*)))
+(define (swank-trace-dialog:clear-trace-tree socket)
+  (set! *traces* '())
+  (set! *trace-ids* '(nil))
+  (set! *trace-counter* 0)
+  'nil)
+(define (internal-untrace! procedure)
+  (unadvise procedure))
+(define *trace-counter* 0)
+(define (next-trace-count!)
+  (set! *trace-counter* (1+ *trace-counter*))
+  *trace-counter*)
+(define *trace-ids* '(nil))
+(define *traces* '())
+(define (internal-trace! procedure)
+  (advise-entry procedure (lambda (proc params env)
+			    (set! *trace-ids* (cons (next-trace-count!) *trace-ids*))))
+  (advise-exit procedure (lambda (proc params exit env)
+			   (let ((trace-id (car *trace-ids*)))
+			     (set! *trace-ids* (cdr *trace-ids*))
+			     (set! *traces* (cons (make-itrace trace-id (car *trace-ids*) proc params (list exit)) *traces*))))))
 
+(define (swank-trace-dialog:dialog-untrace symbol)
+  (let ((function (swank::from-string (symbol->string symbol))))
+    (internal-untrace! function)
+    (set! *traced-functions* (delete function *traced-functions*))))
+
+(define (find-itrace number)
+  (find (lambda (el) (= number (itrace-id el))) *traces*))
+
+(define (swank-trace-dialog:report-trace-detail socket number)
+  (let ((part (find-itrace number)))
+    (append (describe-trace-for-emacs part)
+	    '(nil)
+	    (list (procedure-name (itrace-function part))))))
 (define (swank-trace-dialog:dialog-untrace-all)
-  (set! *traced* '()))
+  (for-each internal-untrace! *traced-functions*)
+  (set! *traced-functions* '()))
+
 (define-syntax cl:progn
   (syntax-rules ()
     ((cl:progn a b ...)
@@ -1592,18 +1693,52 @@ swank:xref
 (eval
  '(define trace-indentation -2)
  (->environment '(runtime advice)))
+
 (define (swank-trace-dialog:report-specs #!optional socket) ;; may be called inside cl:progn when hitting the untrace button in the trace dialog
   socket
-  (if (null? *traced*)
+  (if (null? *traced-functions*)
       'nil
       (map (lambda (el)
 	     (procedure-name el))
-	   *traced*)))
+	   *traced-functions*)))
 (define (swank-trace-dialog:report-total socket)
-  0)
+  (length *traces*))
+
+(define (describe-trace-for-emacs itrace)
+  `(,(itrace-id itrace) ,(itrace-parent-id itrace) ,(procedure-name (itrace-function itrace))
+    ,(map (lambda (index param)
+	    `(,index ,(write-to-string param)))
+	  (iota (length (itrace-params itrace)))
+	  (itrace-params itrace))
+    ,(map (lambda (index res)
+	    `(,index ,(write-to-string res)))
+	  (iota (length (itrace-returns itrace)))
+	  (itrace-returns itrace))))
+(define (swank-trace-dialog:inspect-trace-part socket trace part type)
+  (let* ((itrace (find-itrace trace))
+	 (values ((case type
+		    ((:arg)
+		     itrace-params)
+		    ((:retval)
+		     itrace-returns))
+		  itrace))
+	 (value (list-ref values part)))
+    (inspect-object value)))
+
+(define (swank-trace-dialog:report-partial-tree socket key)
+  (let ((res `(,(map (lambda (el)
+		       (describe-trace-for-emacs el))
+		     *traces*)
+	       0 ,key)))
+    ;; (set! *traces* '())
+    ;; (set! *trace-ids* '(nil))
+    ;; (set! *trace-counter* 0)
+    res))
+
 (eval '(define (trace-indent level)
          (display (make-string level #\space)))
       (->environment '(runtime advice)))
+
 (eval '(define (trace-display port procedure arguments #!optional result)
          (fresh-line port)
          (let ((width (- (max 40 (output-port/x-size port)) 1))
