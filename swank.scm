@@ -126,7 +126,7 @@ USA.
                      (lambda ()
                        (let-fluid *top-level-restart* (find-restart 'ABORT)
                                   (lambda ()
-                                    (call-with-current-continuation (lambda (k) (set! escape-to-loop k)))
+                                    (call-with-current-continuation (lambda (k) (set! escape-to-loop (make-fluid k))))
                                     (process-one-message socket 0)))))))
     (if *aborted?*
         (begin
@@ -424,7 +424,7 @@ USA.
 (define *output-buffer* (open-output-string))
 (define *input-buffer* (open-input-string ""))
 (define *reading-continuations* '())
-(define escape-to-loop #f)
+(define escape-to-loop (make-fluid #f))
 (define *read-index* 1)
 
 (define (ensure-input port)
@@ -437,9 +437,13 @@ USA.
            (write-message `(:read-string 1 ,*read-index*)
                           (port/state port))
            (set! *read-index* (+ *read-index* 1))
-           (escape-to-loop #f))))))
+           ((fluid escape-to-loop) #f))))))
 
 (define (initialize-package!)
+  (set! *top-level-restart* (make-fluid unspecific))
+  (set! *sldb-state* (make-fluid #f))
+  (set! *index* (make-fluid unspecific))
+  (set! *buffer-pstring* (make-fluid unspecific))
   (set! repl-port-type
         (make-port-type
          `((WRITE-CHAR
@@ -495,7 +499,9 @@ USA.
     (call-compiler
      (lambda ()
        (let ((env (buffer-env)))
-         (scode-eval (compile-scode (syntax `(begin ,@sexps) env) #t)
+         (scode-eval ((environment-lookup #f 'compile-scode)
+                      (syntax `(begin ,@sexps) env)
+                      #t)
                      env)))
      #f)))
 
@@ -521,7 +527,7 @@ USA.
 		 (lambda ()
 		   (with-i/o-to-repl socket
 				     (lambda ()
-				       (compile-file file))))
+				       ((environment-lookup #f 'compile-file) file))))
 		 file)))
     (if (elisp-true? load?)
 	(swank:load-file socket
@@ -538,7 +544,7 @@ USA.
   socket
   (with-output-to-string
     (lambda ()
-      (compiler:disassemble
+      ((environment-lookup #f 'compiler:disassemble)
        (eval (read-from-string string)
              (buffer-env))))))
 
@@ -960,7 +966,7 @@ swank:xref
                 (dynamic-wind
                     (lambda () #f)
                     (lambda ()
-                      (write-message `(:debug 0 ,level ,@(sldb-info *sldb-state* 0 20))
+                      (write-message `(:debug 0 ,level ,@(sldb-info (fluid *sldb-state*) 0 20))
                                      socket)
                       (write-message `(:debug-activate 0 ,level) socket)
                       (let-fluid escape-to-loop (call-with-current-continuation (lambda (k) k))
@@ -1013,11 +1019,11 @@ swank:xref
 
 (define (swank:sldb-abort socket . args)
   socket args
-  (abort (sldb-state.restarts *sldb-state*)))
+  (abort (sldb-state.restarts (fluid *sldb-state*))))
 
 (define (swank:sldb-continue socket . args)
   socket args
-  (continue (sldb-state.restarts *sldb-state*)))
+  (continue (sldb-state.restarts (fluid *sldb-state*))))
 
 (define (restart-has-interactor? restart)
   (restart/interactor restart))
@@ -1025,17 +1031,17 @@ swank:xref
 (define *open-restart-abort-indexes* (make-fluid '()))
 (define (swank:invoke-nth-restart-for-emacs socket sldb-level n)
   socket sldb-level
-  (let ((restart (list-ref (sldb-state.restarts *sldb-state*) n)))
+  (let ((restart (list-ref (sldb-state.restarts (fluid *sldb-state*)) n)))
     (set! *open-restart-abort-indexes* (make-fluid (cons (fluid *index*) (fluid *open-restart-abort-indexes*))))
     (invoke-restart-interactively restart)))
 
 (define (swank:debugger-info-for-emacs socket from to)
   socket
-  (sldb-info *sldb-state* from to))
+  (sldb-info (fluid *sldb-state*) from to))
 
 (define (swank:backtrace socket from to)
   socket
-  (sldb-backtrace (sldb-state.condition *sldb-state*) from to))
+  (sldb-backtrace (sldb-state.condition (fluid *sldb-state*)) from to))
 
 (define (sldb-backtrace condition from to)
   (sldb-backtrace-aux (condition/continuation condition) from to))
@@ -1101,12 +1107,12 @@ swank:xref
 
 (define (swank:sdlb-print-condition socket)
   socket
-  (condition/report-string (sldb-state.condition *sldb-state*))
+  (condition/report-string (sldb-state.condition (fluid *sldb-state*)))
   )
 
 (define (swank:inspect-current-condition socket)
   socket
-  (inspect-object (sldb-state.condition *sldb-state*)))
+  (inspect-object (sldb-state.condition (fluid *sldb-state*))))
 
 (define (swank:frame-locals-and-catch-tags socket frame)
   socket
@@ -1139,7 +1145,7 @@ swank:xref
 (define (sldb-get-frame index)
   (stream-ref (continuation->frames
                (condition/continuation
-                (sldb-state.condition *sldb-state*)))
+                (sldb-state.condition (fluid *sldb-state*))))
               index))
 
 (define (frame-var-value frame var)
@@ -1162,7 +1168,7 @@ swank:xref
 
 (define (all-completions prefix environment)
   (let ((prefix
-         (if (environment-lookup environment '*PARSER-CANONICALIZE-SYMBOLS?*)
+         (if (fluid (environment-lookup environment '*PARSER-CANONICALIZE-SYMBOLS?*))
              (string-downcase prefix)
              prefix))
         (completions '()))
@@ -1533,7 +1539,7 @@ swank:xref
          (stream (iline "block" (compiled-entry/block o))
                  (with-output-to-string
                    (lambda ()
-                     (compiler:disassemble o)))))))
+                     ((environment-lookup #f compiler:disassemble) o)))))))
 
 (define (inspect-code-block block)
   (let loop ((i (compiled-code-block/constants-start block)))
@@ -1625,10 +1631,10 @@ swank:xref
           form)))
  (->environment '(runtime parser)))
 
-;; TODO: fix this
-;; (eval
-;;  '(vector-set! (parser-table/special runtime-parser-table) (char->integer #\.) handler:dot)
-;;  (->environment '(runtime parser)))
+;; TODO: use the port's parser table instead of the global one
+(eval
+ '(vector-set! (parser-table/special (fluid runtime-parser-table)) (char->integer #\.) handler:dot)
+ (->environment '(runtime parser)))
 
 ;;;; Tracing
 (define-structure itrace id parent-id function params returns)
